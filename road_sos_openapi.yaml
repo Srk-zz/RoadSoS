@@ -1,0 +1,1181 @@
+openapi: 3.0.3
+
+info:
+  title: Road SOS API
+  version: 1.0.0
+  description: |
+    Enterprise API specification for the Road SOS emergency response platform.
+
+    ## Architecture overview
+    All public endpoints are served through the **API Gateway (Kong)** at the base URL.
+    Two internal services (ORM Data Layer, Email Service) are not accessible from the
+    internet — they are documented here for inter-service contract reference only.
+
+    ## Authentication
+    All public endpoints (except health checks) require a Bearer JWT token issued by the
+    Auth service. Pass it in the `Authorization` header as `Bearer <token>`.
+
+    ## Services and base paths
+    | Service              | Gateway path prefix   | Internal port |
+    |----------------------|-----------------------|---------------|
+    | Police service       | /api/v1/police        | 8001          |
+    | Ambulance service    | /api/v1/ambulance     | 8002          |
+    | Fire dept service    | /api/v1/fire          | 8003          |
+    | Vehicle recovery     | /api/v1/recovery      | 8004          |
+    | ORM data layer       | internal only         | 8005          |
+    | Email service        | internal only         | 8006          |
+
+  contact:
+    name: Road SOS Engineering
+    email: engineering@roadsos.in
+  license:
+    name: MIT
+
+servers:
+  - url: https://api.roadsos.in
+    description: Production gateway
+  - url: http://localhost:8080
+    description: Local Kong gateway (Docker Compose)
+  - url: http://orm-layer:8005
+    description: ORM data layer — internal Docker network only
+  - url: http://email-service:8006
+    description: Email service — internal Docker network only
+
+tags:
+  - name: Police
+    description: Police SOS — one-tap, no form. Location is the only payload.
+  - name: Ambulance
+    description: Ambulance request — patient detail form + GPS location.
+  - name: Fire
+    description: Fire department report — fire details form + GPS location.
+  - name: Recovery
+    description: Vehicle recovery request — breakdown details form + GPS location.
+  - name: Incidents
+    description: |
+      Shared incident read endpoints accessible from the mobile app.
+      Write operations go through each service's own endpoint.
+  - name: ORM Layer — Incidents
+    description: |
+      Internal only. Called by emergency microservices to persist and retrieve
+      incident records. Never exposed through the API Gateway.
+  - name: ORM Layer — Email Logs
+    description: Internal only. Records every email dispatch attempt.
+  - name: Email Service
+    description: |
+      Internal only. Renders Jinja2 HTML templates and sends via MailHog SMTP.
+      Called by each emergency service after saving an incident.
+  - name: Health
+    description: Health check endpoints — no auth required, used by Kong and Docker.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Health ─────────────────────────────────────────────────────────────────
+  /api/v1/police/health:
+    get:
+      tags: [Health]
+      summary: Police service health
+      operationId: policeHealth
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/v1/ambulance/health:
+    get:
+      tags: [Health]
+      summary: Ambulance service health
+      operationId: ambulanceHealth
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/v1/fire/health:
+    get:
+      tags: [Health]
+      summary: Fire dept service health
+      operationId: fireHealth
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/v1/recovery/health:
+    get:
+      tags: [Health]
+      summary: Vehicle recovery service health
+      operationId: recoveryHealth
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  # ── Police ─────────────────────────────────────────────────────────────────
+  /api/v1/police/sos:
+    post:
+      tags: [Police]
+      summary: Trigger police SOS
+      operationId: triggerPoliceSOS
+      description: |
+        One-tap SOS. The mobile app captures GPS, builds this payload, and fires
+        immediately — no form for the user to fill. The service:
+        1. Validates the JWT and extracts user_id.
+        2. POSTs to ORM data layer → saves incident to MySQL.
+        3. POSTs to Email service → sends alert to police.control@mock.roadsos.in.
+        4. Returns incident_id to the mobile app for status polling.
+      security:
+        - BearerJWT: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PoliceSosRequest'
+            example:
+              user_id: "usr_01HZQ2K8XP"
+              location:
+                lat: 13.0827
+                lng: 80.2707
+                accuracy_metres: 8.5
+                captured_at: "2025-04-07T14:32:10Z"
+              device_id: "rn_device_abc123"
+      responses:
+        '201':
+          description: SOS accepted, incident created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SosCreatedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ── Ambulance ───────────────────────────────────────────────────────────────
+  /api/v1/ambulance/request:
+    post:
+      tags: [Ambulance]
+      summary: Submit ambulance request
+      operationId: requestAmbulance
+      description: |
+        Form-based request. The mobile app collects patient details before submitting.
+        GPS is captured automatically at form open and included in the payload.
+        On success, sends alert to ambulance.dispatch@mock.roadsos.in.
+      security:
+        - BearerJWT: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AmbulanceRequest'
+            example:
+              user_id: "usr_01HZQ2K8XP"
+              location:
+                lat: 13.0827
+                lng: 80.2707
+                accuracy_metres: 12.0
+                captured_at: "2025-04-07T14:35:00Z"
+              patient:
+                name: "Rajan Kumar"
+                age: 45
+                is_conscious: true
+                has_visible_bleeding: true
+                known_condition: "diabetic"
+                people_injured: 2
+              additional_notes: "hit by a truck near signal"
+      responses:
+        '201':
+          description: Ambulance request accepted, incident created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SosCreatedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ── Fire ────────────────────────────────────────────────────────────────────
+  /api/v1/fire/report:
+    post:
+      tags: [Fire]
+      summary: Submit fire emergency report
+      operationId: reportFire
+      description: |
+        Form-based. User selects fire type and fills building details.
+        GPS is captured automatically. Sends alert to fire.station@mock.roadsos.in.
+      security:
+        - BearerJWT: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FireRequest'
+            example:
+              user_id: "usr_01HZQ2K8XP"
+              location:
+                lat: 13.0827
+                lng: 80.2707
+                accuracy_metres: 6.0
+                captured_at: "2025-04-07T15:00:00Z"
+              fire_details:
+                type: "building"
+                building_floors: 4
+                people_trapped: true
+                hazardous_materials: false
+              additional_notes: "fire on second floor, people on rooftop"
+      responses:
+        '201':
+          description: Fire report accepted, incident created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SosCreatedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ── Vehicle Recovery ─────────────────────────────────────────────────────────
+  /api/v1/recovery/request:
+    post:
+      tags: [Recovery]
+      summary: Submit vehicle recovery request
+      operationId: requestRecovery
+      description: |
+        Form-based. User enters vehicle and breakdown details.
+        GPS captured automatically. Sends alert to recovery.team@mock.roadsos.in.
+      security:
+        - BearerJWT: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryRequest'
+            example:
+              user_id: "usr_01HZQ2K8XP"
+              location:
+                lat: 13.0827
+                lng: 80.2707
+                accuracy_metres: 10.0
+                captured_at: "2025-04-07T15:20:00Z"
+              vehicle:
+                make: "Maruti"
+                model: "Swift"
+                plate: "TN09AB1234"
+                colour: "white"
+                breakdown_type: "engine_failure"
+              tow_destination: "Annanagar service centre"
+              additional_notes: "engine stopped suddenly, no smoke"
+      responses:
+        '201':
+          description: Recovery request accepted, incident created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SosCreatedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ── Shared incident read ─────────────────────────────────────────────────────
+  /api/v1/incidents/{incident_id}:
+    get:
+      tags: [Incidents]
+      summary: Get incident status by ID
+      operationId: getIncident
+      description: |
+        Mobile app polls this after submitting any SOS or request to show
+        the "Help is on the way" screen with live status updates.
+        Routed by the gateway to the ORM data layer read endpoint.
+      security:
+        - BearerJWT: []
+      parameters:
+        - name: incident_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "inc_01HZR9MWQT"
+      responses:
+        '200':
+          description: Incident found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/incidents:
+    get:
+      tags: [Incidents]
+      summary: List incidents for the authenticated user
+      operationId: listIncidents
+      description: Returns the incident history for the calling user, newest first.
+      security:
+        - BearerJWT: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: service_type
+          in: query
+          description: Filter by incident type
+          schema:
+            $ref: '#/components/schemas/ServiceType'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/IncidentStatus'
+      responses:
+        '200':
+          description: Paginated list of incidents
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── ORM Data Layer — internal ────────────────────────────────────────────────
+  /incidents:
+    post:
+      tags: [ORM Layer — Incidents]
+      summary: Create an incident record
+      operationId: ormCreateIncident
+      description: |
+        Called by each emergency microservice after receiving a valid request.
+        Writes one row to the `incidents` table and returns the generated ID.
+        **Internal service — not exposed through the API Gateway.**
+      servers:
+        - url: http://orm-layer:8005
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrmCreateIncidentRequest'
+      responses:
+        '201':
+          description: Incident row created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrmIncidentCreated'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [ORM Layer — Incidents]
+      summary: List incidents (admin / analytics)
+      operationId: ormListIncidents
+      description: |
+        Internal. Used by the Analytics service and admin panel backend.
+        Supports filtering and pagination.
+        **Internal service — not exposed through the API Gateway.**
+      servers:
+        - url: http://orm-layer:8005
+      security: []
+      parameters:
+        - name: user_id
+          in: query
+          schema:
+            type: string
+        - name: service_type
+          in: query
+          schema:
+            $ref: '#/components/schemas/ServiceType'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/IncidentStatus'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of incident rows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentListResponse'
+
+  /incidents/{id}:
+    get:
+      tags: [ORM Layer — Incidents]
+      summary: Get a single incident row
+      operationId: ormGetIncident
+      description: Internal. Called by the gateway-facing /api/v1/incidents/{id} proxy.
+      servers:
+        - url: http://orm-layer:8005
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Incident row
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /incidents/{id}/status:
+    patch:
+      tags: [ORM Layer — Incidents]
+      summary: Update incident status
+      operationId: ormUpdateIncidentStatus
+      description: |
+        Internal. Allows a service to move an incident through its state machine:
+        created → dispatched → active → resolved | cancelled
+      servers:
+        - url: http://orm-layer:8005
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  $ref: '#/components/schemas/IncidentStatus'
+                resolved_note:
+                  type: string
+                  maxLength: 500
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Invalid status transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ── ORM Data Layer — Email Logs ──────────────────────────────────────────────
+  /email-logs:
+    post:
+      tags: [ORM Layer — Email Logs]
+      summary: Log an email dispatch record
+      operationId: ormCreateEmailLog
+      description: |
+        Called by the Email service after each send attempt (success or failure).
+        Writes one row to the `email_logs` table.
+        **Internal service only.**
+      servers:
+        - url: http://orm-layer:8005
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrmEmailLogRequest'
+      responses:
+        '201':
+          description: Log row created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrmEmailLogCreated'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+    get:
+      tags: [ORM Layer — Email Logs]
+      summary: List email log records
+      operationId: ormListEmailLogs
+      description: Internal. Used by admin and debugging tooling.
+      servers:
+        - url: http://orm-layer:8005
+      security: []
+      parameters:
+        - name: incident_id
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/EmailStatus'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: List of email log rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EmailLog'
+
+  # ── Email Service — internal ─────────────────────────────────────────────────
+  /send:
+    post:
+      tags: [Email Service]
+      summary: Render template and send email via MailHog
+      operationId: sendEmail
+      description: |
+        Called by each emergency microservice after an incident is created.
+        Picks the correct Jinja2 template based on `template_name`, renders it
+        with `context`, and sends via MailHog SMTP on port 1025.
+        After sending, calls ORM data layer POST /email-logs to record the attempt.
+        **Internal service — not exposed through the API Gateway.**
+
+        ## Mock mail IDs per service type
+        | Service          | To address                               |
+        |------------------|------------------------------------------|
+        | police           | police.control@mock.roadsos.in           |
+        | ambulance        | ambulance.dispatch@mock.roadsos.in       |
+        | fire             | fire.station@mock.roadsos.in             |
+        | recovery         | recovery.team@mock.roadsos.in            |
+      servers:
+        - url: http://email-service:8006
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendEmailRequest'
+            examples:
+              police:
+                summary: Police SOS email
+                value:
+                  incident_id: "inc_01HZR9MWQT"
+                  to: "police.control@mock.roadsos.in"
+                  template_name: "police_alert"
+                  context:
+                    incident_id: "inc_01HZR9MWQT"
+                    lat: 13.0827
+                    lng: 80.2707
+                    user_name: "Rajan Kumar"
+                    triggered_at: "2025-04-07T14:32:10Z"
+              ambulance:
+                summary: Ambulance request email
+                value:
+                  incident_id: "inc_01HZR9ABCD"
+                  to: "ambulance.dispatch@mock.roadsos.in"
+                  template_name: "ambulance_alert"
+                  context:
+                    incident_id: "inc_01HZR9ABCD"
+                    patient_name: "Rajan Kumar"
+                    patient_age: 45
+                    is_conscious: true
+                    people_injured: 2
+                    lat: 13.0827
+                    lng: 80.2707
+              fire:
+                summary: Fire alert email
+                value:
+                  incident_id: "inc_01HZRAFIRE"
+                  to: "fire.station@mock.roadsos.in"
+                  template_name: "fire_alert"
+                  context:
+                    incident_id: "inc_01HZRAFIRE"
+                    fire_type: "building"
+                    building_floors: 4
+                    people_trapped: true
+                    lat: 13.0827
+                    lng: 80.2707
+              recovery:
+                summary: Vehicle recovery email
+                value:
+                  incident_id: "inc_01HZRRECOV"
+                  to: "recovery.team@mock.roadsos.in"
+                  template_name: "recovery_alert"
+                  context:
+                    incident_id: "inc_01HZRRECOV"
+                    vehicle_make: "Maruti"
+                    vehicle_model: "Swift"
+                    plate: "TN09AB1234"
+                    breakdown_type: "engine_failure"
+                    lat: 13.0827
+                    lng: 80.2707
+      responses:
+        '200':
+          description: Email sent and logged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendEmailResponse'
+        '500':
+          description: SMTP send failed — logged with status failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendEmailResponse'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPONENTS
+# ─────────────────────────────────────────────────────────────────────────────
+components:
+
+  securitySchemes:
+    BearerJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT issued by the Auth service. Decode to get `user_id`, `role`, and `exp`.
+        Pass as: `Authorization: Bearer <token>`
+
+  # ── Shared primitives ────────────────────────────────────────────────────────
+  schemas:
+
+    ServiceType:
+      type: string
+      enum: [police, ambulance, fire, recovery]
+      description: Which emergency service this incident belongs to.
+
+    IncidentStatus:
+      type: string
+      enum: [created, dispatched, active, resolved, cancelled]
+      description: |
+        State machine transitions:
+        created → dispatched → active → resolved
+        Any state → cancelled (user or admin initiated)
+
+    EmailStatus:
+      type: string
+      enum: [sent, failed, retrying]
+
+    BreakdownType:
+      type: string
+      enum: [flat_tyre, engine_failure, accident_damage, out_of_fuel, other]
+
+    FireType:
+      type: string
+      enum: [vehicle, building, forest, industrial, other]
+
+    # ── Sub-objects ─────────────────────────────────────────────────────────────
+    GpsLocation:
+      type: object
+      required: [lat, lng, captured_at]
+      properties:
+        lat:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          example: 13.0827
+        lng:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          example: 80.2707
+        accuracy_metres:
+          type: number
+          format: float
+          minimum: 0
+          example: 8.5
+          description: GPS accuracy from the device. Lower is better.
+        captured_at:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC timestamp when the device captured this fix.
+
+    PatientDetails:
+      type: object
+      required: [is_conscious, people_injured]
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        age:
+          type: integer
+          minimum: 0
+          maximum: 130
+        is_conscious:
+          type: boolean
+        has_visible_bleeding:
+          type: boolean
+          default: false
+        known_condition:
+          type: string
+          maxLength: 200
+          description: Free text — allergies, chronic conditions, medications.
+        people_injured:
+          type: integer
+          minimum: 1
+          default: 1
+
+    FireDetails:
+      type: object
+      required: [type]
+      properties:
+        type:
+          $ref: '#/components/schemas/FireType'
+        building_floors:
+          type: integer
+          minimum: 1
+          description: Applicable when type is building or industrial.
+        people_trapped:
+          type: boolean
+          default: false
+        hazardous_materials:
+          type: boolean
+          default: false
+          description: Chemicals, gas cylinders, paint, fuel — anything that escalates risk.
+
+    VehicleDetails:
+      type: object
+      required: [make, model, plate, breakdown_type]
+      properties:
+        make:
+          type: string
+          maxLength: 50
+          example: "Maruti"
+        model:
+          type: string
+          maxLength: 50
+          example: "Swift"
+        plate:
+          type: string
+          maxLength: 20
+          example: "TN09AB1234"
+        colour:
+          type: string
+          maxLength: 30
+        breakdown_type:
+          $ref: '#/components/schemas/BreakdownType'
+
+    # ── Request bodies ───────────────────────────────────────────────────────────
+    PoliceSosRequest:
+      type: object
+      required: [user_id, location]
+      properties:
+        user_id:
+          type: string
+          description: Extracted from JWT on the server side but also sent for logging.
+        location:
+          $ref: '#/components/schemas/GpsLocation'
+        device_id:
+          type: string
+          description: React Native device identifier for deduplication.
+
+    AmbulanceRequest:
+      type: object
+      required: [user_id, location, patient]
+      properties:
+        user_id:
+          type: string
+        location:
+          $ref: '#/components/schemas/GpsLocation'
+        patient:
+          $ref: '#/components/schemas/PatientDetails'
+        additional_notes:
+          type: string
+          maxLength: 500
+
+    FireRequest:
+      type: object
+      required: [user_id, location, fire_details]
+      properties:
+        user_id:
+          type: string
+        location:
+          $ref: '#/components/schemas/GpsLocation'
+        fire_details:
+          $ref: '#/components/schemas/FireDetails'
+        additional_notes:
+          type: string
+          maxLength: 500
+
+    RecoveryRequest:
+      type: object
+      required: [user_id, location, vehicle]
+      properties:
+        user_id:
+          type: string
+        location:
+          $ref: '#/components/schemas/GpsLocation'
+        vehicle:
+          $ref: '#/components/schemas/VehicleDetails'
+        tow_destination:
+          type: string
+          maxLength: 200
+          description: Optional preferred garage or workshop address.
+        additional_notes:
+          type: string
+          maxLength: 500
+
+    # ── Response bodies ──────────────────────────────────────────────────────────
+    SosCreatedResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        incident_id:
+          type: string
+          description: Use this to poll GET /api/v1/incidents/{incident_id}.
+          example: "inc_01HZR9MWQT"
+        service_type:
+          $ref: '#/components/schemas/ServiceType'
+        status:
+          $ref: '#/components/schemas/IncidentStatus'
+        created_at:
+          type: string
+          format: date-time
+        email_dispatched:
+          type: boolean
+          description: Whether the alert email was sent successfully.
+        message:
+          type: string
+          example: "Help is on the way. Your incident ID is inc_01HZR9MWQT."
+
+    IncidentDetail:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "inc_01HZR9MWQT"
+        user_id:
+          type: string
+        service_type:
+          $ref: '#/components/schemas/ServiceType'
+        status:
+          $ref: '#/components/schemas/IncidentStatus'
+        location:
+          $ref: '#/components/schemas/GpsLocation'
+        payload:
+          type: object
+          description: |
+            The full submitted payload for this incident type.
+            Shape varies by service_type — see individual request schemas.
+        email_log_id:
+          type: string
+          description: Reference to the email_logs record for this incident.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        resolved_note:
+          type: string
+          nullable: true
+
+    IncidentListResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+          example: 42
+        limit:
+          type: integer
+        offset:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/IncidentDetail'
+
+    HealthResponse:
+      type: object
+      properties:
+        service:
+          type: string
+          example: "police_service"
+        status:
+          type: string
+          example: "ok"
+        version:
+          type: string
+          example: "1.0.0"
+        timestamp:
+          type: string
+          format: date-time
+
+    # ── ORM Layer schemas ────────────────────────────────────────────────────────
+    OrmCreateIncidentRequest:
+      type: object
+      required: [user_id, service_type, location, payload]
+      properties:
+        user_id:
+          type: string
+        service_type:
+          $ref: '#/components/schemas/ServiceType'
+        location:
+          $ref: '#/components/schemas/GpsLocation'
+        payload:
+          type: object
+          description: |
+            Raw JSON of the service-specific request body.
+            Stored as JSON column in MySQL for flexibility.
+        device_id:
+          type: string
+
+    OrmIncidentCreated:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "inc_01HZR9MWQT"
+        status:
+          $ref: '#/components/schemas/IncidentStatus'
+        created_at:
+          type: string
+          format: date-time
+
+    OrmEmailLogRequest:
+      type: object
+      required: [incident_id, to_address, template_name, status]
+      properties:
+        incident_id:
+          type: string
+        to_address:
+          type: string
+          format: email
+        template_name:
+          type: string
+          enum: [police_alert, ambulance_alert, fire_alert, recovery_alert]
+        status:
+          $ref: '#/components/schemas/EmailStatus'
+        error_message:
+          type: string
+          nullable: true
+          description: Populated when status is failed.
+        sent_at:
+          type: string
+          format: date-time
+
+    OrmEmailLogCreated:
+      type: object
+      properties:
+        id:
+          type: string
+        incident_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/EmailStatus'
+        created_at:
+          type: string
+          format: date-time
+
+    EmailLog:
+      allOf:
+        - $ref: '#/components/schemas/OrmEmailLogRequest'
+        - type: object
+          properties:
+            id:
+              type: string
+            created_at:
+              type: string
+              format: date-time
+
+    # ── Email Service schemas ────────────────────────────────────────────────────
+    SendEmailRequest:
+      type: object
+      required: [incident_id, to, template_name, context]
+      properties:
+        incident_id:
+          type: string
+          description: Used to write the email log via ORM layer after sending.
+        to:
+          type: string
+          format: email
+          description: Mock recipient address for this service type.
+        template_name:
+          type: string
+          enum: [police_alert, ambulance_alert, fire_alert, recovery_alert]
+        context:
+          type: object
+          description: |
+            Template variables injected into the Jinja2 HTML template.
+            Keys vary by template — see request examples above.
+
+    SendEmailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        email_log_id:
+          type: string
+          description: ID of the row written to ORM email_logs table.
+        to:
+          type: string
+        status:
+          $ref: '#/components/schemas/EmailStatus'
+        sent_at:
+          type: string
+          format: date-time
+          nullable: true
+        error:
+          type: string
+          nullable: true
+          description: SMTP error message if send failed.
+
+    # ── Error schemas ────────────────────────────────────────────────────────────
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error_code:
+          type: string
+          example: "INCIDENT_NOT_FOUND"
+        message:
+          type: string
+          example: "No incident found with that ID."
+        detail:
+          type: object
+          description: Field-level validation errors when applicable.
+
+    ValidationError:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error_code:
+          type: string
+          example: "VALIDATION_ERROR"
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+                example: "location.lat"
+              message:
+                type: string
+                example: "value must be between -90 and 90"
+
+  # ── Reusable responses ───────────────────────────────────────────────────────
+  responses:
+    BadRequest:
+      description: Malformed request body or missing required fields
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Unauthorized:
+      description: Missing or expired JWT
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            error_code: "UNAUTHORIZED"
+            message: "Token is missing or has expired."
+
+    NotFound:
+      description: Requested resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    UnprocessableEntity:
+      description: Request body is well-formed but fails business validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationError'
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            error_code: "INTERNAL_ERROR"
+            message: "An unexpected error occurred. Please try again."

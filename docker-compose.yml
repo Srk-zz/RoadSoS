@@ -1,0 +1,74 @@
+services:
+  # 1. Message Broker
+  redis:
+    image: redis:alpine
+    networks:
+      - roadsos-net
+
+  # 2. Database (REQUIRED for your ORM Layer)
+  db:
+    image: mysql:8.0
+    environment:
+      - MYSQL_DATABASE=roadsos
+      - MYSQL_ROOT_PASSWORD=password
+    networks:
+      - roadsos-net
+    healthcheck:
+      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # 3. Ambulance API Service
+  ambulance-service:
+    build: ./ambulance_service
+    ports:
+      - "8082:8082"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - ORM_SERVICE_URL=http://orm-layer:8086
+      - EMAIL_SERVICE_URL=http://email-service:8085
+    networks:
+      - roadsos-net
+    depends_on:
+      - redis
+      - orm-layer
+
+  # 4. Background Worker
+  ambulance-worker:
+    build: ./ambulance_service
+    # Changed from tasks.celery_app to just tasks if the file is main level
+    command: celery -A tasks worker --loglevel=info
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - EMAIL_SERVICE_URL=http://email-service:8085
+    networks:
+      - roadsos-net
+    depends_on:
+      - redis
+      - email-service
+
+  # 5. Internal Data Layer
+  orm-layer:
+    build: ./orm_layer
+    ports:
+      - "8086:8086"
+    environment:
+      # This matches the 'db' service added above
+      - DATABASE_URL=mysql+pymysql://root:password@db/roadsos
+    networks:
+      - roadsos-net
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # 6. Internal Email Dispatcher
+  email-service:
+    build: ./email_service
+    ports:
+      - "8085:8085"
+    networks:
+      - roadsos-net
+
+networks:
+  roadsos-net:
+    driver: bridge

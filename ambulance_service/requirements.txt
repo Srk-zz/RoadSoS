@@ -1,0 +1,14 @@
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# Async HTTP Client (To talk to ORM and Email Services)
+httpx==0.26.0
+
+# Task Queue (Producer)
+celery==5.3.6
+redis==5.0.1
+
+# Data Validation
+pydantic[email]==2.6.0
+python-multipart==0.0.6
