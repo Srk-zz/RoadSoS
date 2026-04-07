@@ -1,0 +1,9 @@
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# Templating Engine
+jinja2==3.1.3
+
+# Data Validation
+pydantic[email]==2.6.0

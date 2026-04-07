@@ -1,0 +1,26 @@
+# Use a slim Python image for efficiency
+FROM python:3.10-slim
+
+# Prevent Python from generating .pyc files and enable unbuffered logging
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
+WORKDIR /app
+
+# Install system dependencies if needed (e.g., for email libraries)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the application code and the /templates folder
+COPY . .
+
+# Expose the new requested port
+EXPOSE 8085
+
+# Start the service
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8085"]
