@@ -1,0 +1,21 @@
+# Use a slim Python image for a smaller footprint
+FROM python:3.10-slim
+
+# Set environment variables to improve Python behavior in Docker
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy source code
+COPY . .
+
+# Update: Expose the new Ambulance Service port
+EXPOSE 8082
+
+# Update: Run uvicorn on the correct port 8082
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8082"]
